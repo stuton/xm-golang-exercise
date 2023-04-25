@@ -1,0 +1,84 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:14
+    container_name: postgres
+    ports:
+      - 5432:5432
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: xm
+    restart: always
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - 22181:2181
+  
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - 29092:29092
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - 9093:8080
+    environment:
+      DYNAMIC_CONFIG_ENABLED: true
+    depends_on:
+      - kafka
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.42
+    container_name: jaeger
+    command:
+      - "--memory.max-traces"
+      - "10000"
+      - "--query.base-path"
+      - "/jaeger/ui"
+    restart: unless-stopped
+    ports:
+      - "6831:6831" # Thrift-compact protocol (used by most SDKs)
+      - "6832:6832" # over Thrift-binary protocol (used by Node.js SDK)
+      - "4317:4317" # accept OpenTelemetry Protocol (OTLP) over gRPC
+      - "5778:5778" # serve configs (sampling, etc.)
+      - "16686:16686" # serve frontend
+      - "14268:14268" # Accepts spans directly from clients in jaeger.thrift format with binary thrift protocol 
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+
+  api:
+    container_name: api
+    ports:
+      - 8080:8080
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - ./config/docker.env
+    depends_on:
+      postgres:
+        condition: service_healthy
