@@ -1,4 +1,4 @@
-include config/local.env
+include .env
 
 PATH_TO_MIGRATIONS=migrations
 MIGRATE_VERSION=4.15.2
@@ -29,17 +29,17 @@ migrate-reset:
 	@echo "Running all new database migrations..."
 	$(MIGRATE_COMMAND) up
 
-run:
+run-local:
 	@echo "Running docker containers..."
 	@docker-compose up --build
 
-down:
+down-local:
 	@echo "Shutdown docker containers..."
 	@docker-compose down -v
 
 .PHONY: test
 test:
-	go test -v ./...
+	go test -race -v ./...
 
 .PHONY: lint
 lint:

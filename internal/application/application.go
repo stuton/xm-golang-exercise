@@ -5,132 +5,147 @@ import (
 	"net/http"
 	"os/signal"
 	"syscall"
+	"time"
 
-	"github.com/gin-contrib/logger"
+	ginzap "github.com/gin-contrib/zap"
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v4/log/zapadapter"
 	"github.com/segmentio/kafka-go"
-	"github.com/spf13/viper"
+	"go.uber.org/zap"
 
-	"github.com/rs/zerolog/log"
-
-	"github.com/stuton/xm-golang-exercise/internal/handler"
-	"github.com/stuton/xm-golang-exercise/internal/middleware"
+	"github.com/stuton/xm-golang-exercise/internal/application/configuration"
+	companieshandler "github.com/stuton/xm-golang-exercise/internal/companies/handler"
+	companiesrepository "github.com/stuton/xm-golang-exercise/internal/companies/repository"
+	companiesservice "github.com/stuton/xm-golang-exercise/internal/companies/service"
 	"github.com/stuton/xm-golang-exercise/internal/producer"
-	"github.com/stuton/xm-golang-exercise/internal/repository"
-	"github.com/stuton/xm-golang-exercise/internal/service"
-	"github.com/stuton/xm-golang-exercise/utils"
+	"github.com/stuton/xm-golang-exercise/internal/server/http/middleware"
+	usershandler "github.com/stuton/xm-golang-exercise/internal/users/handler"
+	usersrepository "github.com/stuton/xm-golang-exercise/internal/users/repository"
+	usersservice "github.com/stuton/xm-golang-exercise/internal/users/service"
+	"github.com/stuton/xm-golang-exercise/utils/database"
+	"github.com/stuton/xm-golang-exercise/utils/jwt"
 )
 
-type application struct {
-	CompanyService service.CompanyService
-	UserService    service.UserService
+type routers struct {
+	companiesHandlers companieshandler.CompaniesHandlers
+	usersHandlers     usershandler.UsersHandlers
+	jwtMiddleware     middleware.JwtAuthMiddleware
 }
 
-var app application
-
-func New() {
+func Run(logger *zap.SugaredLogger) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	utils.InitConfig()
-	utils.InitLogger()
+	config, err := configuration.Load()
+	if err != nil {
+		logger.Fatalf("unable to load configuration: %v", err)
+	}
 
-	connection, err := utils.NewDb(
-		viper.GetString("DATABASE_URI"),
-		utils.WithMaxOpenConnections(viper.GetInt("DATABASE_MAX_OPEN_CONN")),
-		utils.WithMaxIdleConnectionsTime(viper.GetDuration("DATABASE_MAX_IDLE_TIME")),
-		utils.WithMaxIdleConnections(viper.GetInt("DATABASE_MAX_IDLE_CONN")),
-		utils.WithMaxOpenConnectionsTime(viper.GetDuration("DATABASE_MAX_OPEN_TIME")),
+	connection, err := database.NewDb(
+		config.DatabaseURI,
+		database.WithLogger(zapadapter.NewLogger(logger.Desugar())),
+		database.WithMaxOpenConnections(config.DatabaseMaxOpenConn),
+		database.WithMaxIdleConnectionsTime(config.DatabaseMaxIdleTime),
+		database.WithMaxIdleConnections(config.DatabaseMaxIdleConn),
+		database.WithMaxOpenConnectionsTime(config.DatabaseMaxOpenTime),
 	)
 
 	if err != nil {
-		log.Fatal().Msgf("Unable to connect to database host: %v", err)
+		logger.Fatalf("unable to connect to database host: %v", err)
 	}
 
-	kafkaConnection, err := initKafkaProducer()
+	defer func() {
+		if err := connection.Close(); err != nil {
+			logger.Errorf("unable close database connections: %v", err)
+		}
+	}()
+
+	kafkaConnection, err := kafka.DialLeader(ctx, "tcp", config.KafkaHost, config.KafkaTopic, config.KafkaPortition)
 
 	if err != nil {
-		log.Fatal().Msgf("Unable to connect to kafka hosts: %v", err)
+		logger.Fatalf("Unable to connect to kafka hosts: %v", err)
 	}
 
-	app = application{
-		CompanyService: service.NewCompanyService(
-			repository.NewCompanyRepository(connection),
-			producer.NewProducerProcessing(kafkaConnection),
+	defer func() {
+		if err := kafkaConnection.Close(); err != nil {
+			logger.Errorf("Unable close kafka connection: %v", err)
+		}
+	}()
+
+	j := jwt.New(config)
+
+	h := routers{
+		companiesHandlers: companieshandler.NewCompaniesHandlers(
+			companiesservice.NewCompanyService(
+				logger,
+				companiesrepository.NewCompanyRepository(connection),
+				producer.NewProducerProcessing(kafkaConnection, config.KafkaTopic),
+			),
+			logger,
 		),
-		UserService: service.NewUserService(
-			repository.NewUserRepository(connection),
+		usersHandlers: usershandler.NewUsersHandlers(
+			usersservice.NewUserService(
+				logger,
+				usersrepository.NewUserRepository(connection),
+				j,
+			),
+			logger,
 		),
+		jwtMiddleware: middleware.NewJwtAuthMiddleware(j),
 	}
 
-	srv := app.initRouters()
+	gin.SetMode(config.GinMode)
+
+	server := &http.Server{
+		Addr:    config.ServerPort,
+		Handler: initRouters(logger, h),
+	}
 
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal().Msgf("Unable to run server: %s\n", err)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Fatalf("unable to run server: %s\n", err)
 		}
 	}()
 
 	<-ctx.Done()
 
-	log.Info().Msg("Shutting down server...")
+	logger.Info("Shutting down server...")
 
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Error().Msgf("Server forced to shutdown: %v", err)
+	if err := server.Shutdown(ctx); err != nil {
+		logger.Errorf("Server forced to shutdown: %v", err)
 	}
 
-	if err := connection.Close(); err != nil {
-		log.Error().Msgf("Unable close database connections: %v", err)
-	}
+	logger.Info("Server exiting")
 
-	if err := kafkaConnection.Close(); err != nil {
-		log.Error().Msgf("Unable close kafka connection: %v", err)
-	}
-
-	log.Info().Msg("Server exiting")
-
+	return nil
 }
 
-func initKafkaProducer() (*kafka.Conn, error) {
-	conn, err := kafka.DialLeader(context.Background(), "tcp", viper.GetString("KAFKA_HOST"), viper.GetString("KAFKA_TOPIC"), 0)
-
-	if err != nil {
-		log.Fatal().Msgf("failed to dial leader: %v", err)
-	}
-
-	return conn, err
-}
-
-func (app application) initRouters() *http.Server {
-	gin.SetMode(viper.GetString("GIN_MODE"))
-
+func initRouters(logger *zap.SugaredLogger, routers routers) *gin.Engine {
 	r := gin.New()
 
-	r.Use(logger.SetLogger(), gin.Recovery())
+	r.Use(ginzap.Ginzap(logger.Desugar(), time.RFC3339, true))
+	r.Use(ginzap.RecoveryWithZap(logger.Desugar(), true))
 
 	v1 := r.Group("/api/v1")
 	{
 		userGroup := v1.Group("/login")
 		{
-			userGroup.POST("", handler.NewUserLoginHandler(app.UserService).Login())
+			userGroup.POST("", routers.usersHandlers.UserLoginHandler.Login())
 		}
 
 		companiesGroup := v1.Group("/companies")
 		{
-			companiesGroup.GET("/:id", handler.NewGetCompanyByIDHandler(app.CompanyService).GetCompanyByID())
-			// private methods
-			authCompaniesGroup := companiesGroup.Group("")
-			authCompaniesGroup.Use(middleware.JwtAuthMiddleware())
+			companiesGroup.GET("/:id", routers.companiesHandlers.GetCompanyByIDHandler.GetCompanyByID())
 
-			authCompaniesGroup.POST("", handler.NewCreateCompanyHandler(app.CompanyService).CreateCompany())
-			authCompaniesGroup.PATCH("/:id", handler.NewUpdateCompanyHandler(app.CompanyService).UpdateCompany())
-			authCompaniesGroup.DELETE("/:id", handler.NewDeleteCompanyByIDHandler(app.CompanyService).DeleteCompanyByID())
+			authCompaniesGroup := companiesGroup.Group("")
+			authCompaniesGroup.Use(routers.jwtMiddleware.Do())
+
+			authCompaniesGroup.POST("", routers.companiesHandlers.CreateCompanyHandler.CreateCompany())
+			authCompaniesGroup.PATCH("/:id", routers.companiesHandlers.UpdateCompanyHandler.UpdateCompany())
+			authCompaniesGroup.DELETE("/:id", routers.companiesHandlers.DeleteCompanyByIDHandler.DeleteCompanyByID())
 		}
 	}
 
-	return &http.Server{
-		Addr:    viper.GetString("APP_PORT"),
-		Handler: r,
-	}
+	return r
 }

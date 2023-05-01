@@ -5,26 +5,21 @@ import (
 	"fmt"
 
 	"github.com/segmentio/kafka-go"
-
-	"github.com/stuton/xm-golang-exercise/internal/model"
 )
-
-type EventMessage struct {
-	EventType EventType
-	Company   model.Company
-}
 
 type ProducerProcessing struct {
 	kafkaProducer *kafka.Conn
+	topic         string
 }
 
-func NewProducerProcessing(kafkaProducer *kafka.Conn) ProducerProcessing {
+func NewProducerProcessing(kafkaProducer *kafka.Conn, topic string) ProducerProcessing {
 	return ProducerProcessing{
 		kafkaProducer: kafkaProducer,
+		topic:         topic,
 	}
 }
 
-func (p ProducerProcessing) WriteMessages(topic string, message interface{}) error {
+func (p ProducerProcessing) WriteMessages(message interface{}, topic ...string) error {
 	messageBytes, err := json.Marshal(message)
 
 	if err != nil {
@@ -32,7 +27,7 @@ func (p ProducerProcessing) WriteMessages(topic string, message interface{}) err
 	}
 
 	if _, err := p.kafkaProducer.WriteMessages(kafka.Message{
-		Topic: topic,
+		Topic: p.topic,
 		Value: messageBytes,
 	}); err != nil {
 		return fmt.Errorf("unable to write message into queue: %v", err)
