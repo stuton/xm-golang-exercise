@@ -5,13 +5,13 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-func New(service_name string, outputPaths ...string) (*zap.SugaredLogger, error) {
+func New(serviceName string, outputPaths ...string) (*zap.SugaredLogger, error) {
 	config := zap.NewProductionConfig()
 
 	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 	config.DisableStacktrace = true
 	config.InitialFields = map[string]any{
-		"service": service_name,
+		"service": serviceName,
 	}
 
 	config.OutputPaths = []string{"stdout"}

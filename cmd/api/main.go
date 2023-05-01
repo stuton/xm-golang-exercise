@@ -14,11 +14,11 @@ func main() {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	defer log.Sync()
+	defer log.Sync() //nolint:all
 
 	if err := application.Run(log); err != nil {
 		log.Errorw("unable to start application", "ERROR", err)
-		log.Sync()
+		log.Sync() //nolint:all
 		os.Exit(1)
 	}
 }
